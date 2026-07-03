@@ -9,6 +9,7 @@ import tools
 
 TOKEN_BUDGET = 6000
 KEEP_RECENT = 6
+MAX_TOOL_CALL_LIMIT= 5
 messages : list[model.Message] = [model.Message(role="system", content="You are a helpfull assistant.")]
 # what are the files in my current dir
 # whats my current dir and what are the files
@@ -23,18 +24,27 @@ def run_compaction():
     global messages
     system_message = messages[0]
     cut =  len(messages)-KEEP_RECENT
-    while messages[cut].role == "tool":
+    while cut >= 2 and (messages[cut].role == "tool" or (messages[cut - 1].role == "assistant" and messages[cut - 1].tool_calls)):
         cut -= 1
     if cut < 2:
+        print("[compaction] skipped: not enough messages to summarize")
         return
     conversations = messages[1:cut]
     text = ""
     for conv in conversations:
-        text+= f"\n{conv.role}: {conv.content}"
+        content = conv.content
+        if conv.tool_calls:
+            calls = "; ".join(f"{c.function.name}({c.function.arguments})" for c in conv.tool_calls)
+            content = f"{content or ''} [tool_calls: {calls}]"
+        text+= f"\n{conv.role}: {content}"
 
+    before = len(messages)
     response = client.compact([system_message, model.Message(role="user", content=text)])
     if response.success is True:
         messages = [system_message] + [response.data.choices[0].message] + messages[cut:]
+        print(f"[compaction] summarized {len(conversations)} messages -> 1; total messages {before} -> {len(messages)}")
+    else:
+        print(f"[compaction] failed: {response.error}")
 
 
 
@@ -44,28 +54,39 @@ def call_tool(tool_to_call:model.ToolCall):
     match tool_to_call.function.name:
         case "run_command":
             args = tool_to_call.function.arguments
-            args = json.loads(args)
-            res = tools.run_command(command=args["command"], timeout=args["timeout"])
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError as e:
+                return f"ran:false;error:invalid tool call arguments (not valid JSON): {e}"
+            try:
+                res = tools.run_command(command=args["command"], timeout=args["timeout"])
+            except KeyError as e:
+                return f"ran:false;error:missing required argument {e}"
             return res
         case _:
             return "no tool found"
 
 
-def tool_call_loop(data:model.ChatCompletionResponse):
+def tool_call_loop(data:model.ChatCompletionResponse, iter_count=1):
+
     choice = data.choices[0]
     response_msg = choice.message
     append_message(response_msg)
-    for tool_call in response_msg.tool_calls:
+    if response_msg.content is not None:
+        print(f"\nassistant: {response_msg.content}\n")
+    for tool_call in response_msg.tool_calls or []:
         tool_output = call_tool(tool_call)
         append_message(model.Message(role="tool",content=tool_output, tool_call_id=tool_call.id))
-        
+    if iter_count > MAX_TOOL_CALL_LIMIT:
+        print("max tool call limit reached")
+        return None
     tool_response = client.chat(messages=messages)
     if tool_response.success is False:
         print(tool_response.error)
         raise Exception(tool_response.error)
     if tool_response.data.choices[0].finish_reason == "tool_calls":
-        return tool_call_loop(tool_response.data)
-    return tool_response.data.choices[0].message
+        return tool_call_loop(tool_response.data, iter_count= iter_count+1)
+    return tool_response.data
 
 token_usage = []
 
@@ -77,15 +98,30 @@ while True:
         print(response.error)
         break
     data = response.data
+    
+    if data.choices[0].finish_reason == "tool_calls":
+        tool_response = tool_call_loop(data=data)
+        if tool_response is None:
+            continue
+        data = tool_response
+
     choice = data.choices[0]
     response_msg = choice.message
-    if choice.finish_reason == "tool_calls":
-        response_msg = tool_call_loop(data=data)
 
     append_message(response_msg)
-    print(response_msg.content)
-    token_usage.append(data.usage.prompt_tokens)
-    print(f"\n\nToken Usage: prompt-{data.usage.prompt_tokens}, answer-{data.usage.completion_tokens}, total-{data.usage.total_tokens}\n\n")
-    print(f"\n Token usage trend: {token_usage}")
-    if data.usage.prompt_tokens > TOKEN_BUDGET:
+    print(f"\nassistant: {response_msg.content}\n")
+
+    usage = data.usage
+    token_usage.append(usage.prompt_tokens)
+    budget_pct = usage.prompt_tokens / TOKEN_BUDGET * 100
+    cache_hit = usage.prompt_cache_hit_tokens
+    cache_info = f", cache-hit {cache_hit}/{usage.prompt_tokens} ({cache_hit / usage.prompt_tokens:.0%})" if cache_hit is not None and usage.prompt_tokens else ""
+    print(
+        f"[usage] prompt {usage.prompt_tokens} | completion {usage.completion_tokens} | "
+        f"total {usage.total_tokens} | budget {budget_pct:.0f}% ({usage.prompt_tokens}/{TOKEN_BUDGET})"
+        f"{cache_info} | messages {len(messages)}"
+    )
+    print(f"[usage] trend (last 10): {token_usage[-10:]}")
+    if usage.prompt_tokens > TOKEN_BUDGET:
+        print(f"[compaction] triggered: prompt tokens {usage.prompt_tokens} exceeded budget {TOKEN_BUDGET}")
         run_compaction()

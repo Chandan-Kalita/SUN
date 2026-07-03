@@ -14,7 +14,7 @@ if not deepseek_secret:
 base_url = "https://api.deepseek.com/chat/completions"
 httpx_client = Client(headers={"Authorization":f"Bearer {deepseek_secret}", "Content-Type":"application/json"}, timeout=Timeout(60))
 
-def chat (messages:list[model.Message]):
+def chat (messages:list[model.Message], remove_tool:bool=False):
     res = httpx_client.post(
         url=base_url,
         json={
@@ -22,7 +22,7 @@ def chat (messages:list[model.Message]):
             "messages": [msg.model_dump(exclude_none=True) for msg in messages],
             "thinking": {"type": "disabled"},
             "stream": False,
-            "tools":tools.tools
+            "tools":tools.tools if remove_tool is False else []
         }
     )
     if res.is_success is False:
@@ -46,7 +46,6 @@ def compact (messages:list[model.Message]):
             "messages": [msg.model_dump(exclude_none=True) for msg in messages],
             "thinking": {"type": "disabled"},
             "stream": False,
-            "tools":tools.tools
         }
     )
     if res.is_success is False:
