@@ -48,7 +48,10 @@ def run_compaction():
 
 
 
-
+def maybe_compact(token_count:int):
+    if token_count > TOKEN_BUDGET:
+        print(f"[compaction] triggered: prompt tokens {token_count} exceeded budget {TOKEN_BUDGET}")
+        run_compaction()
 
 def call_tool(tool_to_call:model.ToolCall):
     match tool_to_call.function.name:
@@ -77,16 +80,19 @@ def tool_call_loop(data:model.ChatCompletionResponse, iter_count=1):
     for tool_call in response_msg.tool_calls or []:
         tool_output = call_tool(tool_call)
         append_message(model.Message(role="tool",content=tool_output, tool_call_id=tool_call.id))
+
     if iter_count > MAX_TOOL_CALL_LIMIT:
         print("max tool call limit reached")
-        return None
+        return {"success":False, "data":data}
+    
     tool_response = client.chat(messages=messages)
     if tool_response.success is False:
         print(tool_response.error)
-        raise Exception(tool_response.error)
+        return {"success":False, "data":data}
+    
     if tool_response.data.choices[0].finish_reason == "tool_calls":
         return tool_call_loop(tool_response.data, iter_count= iter_count+1)
-    return tool_response.data
+    return {"success":True,"data": tool_response.data}
 
 token_usage = []
 
@@ -101,9 +107,10 @@ while True:
     
     if data.choices[0].finish_reason == "tool_calls":
         tool_response = tool_call_loop(data=data)
-        if tool_response is None:
+        if tool_response["success"] is False:
+            maybe_compact(tool_response["data"].usage.prompt_tokens)
             continue
-        data = tool_response
+        data = tool_response["data"]
 
     choice = data.choices[0]
     response_msg = choice.message
@@ -122,6 +129,5 @@ while True:
         f"{cache_info} | messages {len(messages)}"
     )
     print(f"[usage] trend (last 10): {token_usage[-10:]}")
-    if usage.prompt_tokens > TOKEN_BUDGET:
-        print(f"[compaction] triggered: prompt tokens {usage.prompt_tokens} exceeded budget {TOKEN_BUDGET}")
-        run_compaction()
+    maybe_compact(usage.prompt_tokens)
+    
