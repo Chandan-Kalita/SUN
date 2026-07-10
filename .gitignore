@@ -1,3 +1,5 @@
 .venv
 chain.txt
 .env
+permanent_facts.json
+session_facts*

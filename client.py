@@ -14,7 +14,8 @@ if not deepseek_secret:
 base_url = "https://api.deepseek.com/chat/completions"
 httpx_client = Client(headers={"Authorization":f"Bearer {deepseek_secret}", "Content-Type":"application/json"}, timeout=Timeout(60))
 
-def chat (messages:list[model.Message], remove_tool:bool=False):
+def chat (messages:list[model.Message], system_prompt:str):
+    messages = [model.Message(role="system", content=system_prompt)] + messages
     res = httpx_client.post(
         url=base_url,
         json={
@@ -22,7 +23,7 @@ def chat (messages:list[model.Message], remove_tool:bool=False):
             "messages": [msg.model_dump(exclude_none=True) for msg in messages],
             "thinking": {"type": "disabled"},
             "stream": False,
-            "tools":tools.tools if remove_tool is False else []
+            "tools":tools.tools
         }
     )
     if res.is_success is False:
@@ -52,6 +53,46 @@ def compact (messages:list[model.Message]):
         return model.ChatResponse(success=False, data=None, error=res.text)
     parsed = model.ChatCompletionResponse.model_validate(res.json())
     return model.ChatResponse(success=True, data=parsed, error=None)
+
+
+
+def extractor (messages:list[model.Message], existing_facts):
+    messages = [model.Message(role="system", content=f"""You are a fact extractor. Given a conversation history, extract durable facts into two categories.
+
+PERMANENT FACTS: Identity, preferences, environment details that persist across sessions.
+Examples: name, role, OS, preferred tools, skill level, server hostnames.
+
+SESSION FACTS: Current task context, what's been tried, what worked/failed, active goals.
+Examples: "installing nginx on port 8080", "port 443 blocked by firewall", "switched from apt to snap".
+
+You already have these stored facts:
+{existing_facts}
+
+Return ONLY a JSON object with this exact structure, no explanation, no markdown:
+{{"permanent_facts": {{}}, "session_facts": {{}}}}
+
+Rules:
+- Only include NEW facts not already captured, or UPDATED facts where the old value is now wrong.
+- If nothing new to extract, return empty dicts for both.
+- Keys should be short, snake_case descriptors.
+- Values should be concise strings or simple types.
+- Do NOT include conversational fluff, opinions, or anything the user said casually without intent.""")] + messages
+
+    res = httpx_client.post(
+        url=base_url,
+        json={
+            "model": "deepseek-v4-flash",
+            "messages": [msg.model_dump(exclude_none=True) for msg in messages],
+            "thinking": {"type": "disabled"},
+            "stream": False,
+        }
+    )
+    if res.is_success is False:
+        return model.ChatResponse(success=False, data=None, error=res.text)
+    parsed = model.ChatCompletionResponse.model_validate(res.json())
+    print(parsed.choices[0].message.content)
+    return model.ChatResponse(success=True, data=parsed, error=None)
+
 
 
 # {
