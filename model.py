@@ -94,8 +94,6 @@ class ToolResult(BaseModel):
         if self.exit_code is not None:
             header += f" exit_code:{self.exit_code}"
         parts = [header]
-        if self.note:
-            parts.append(f"--- note ---\n{self.note}")
         if self.error:
             parts.append(f"--- error ---\n{self.error}")
         if self.output:
@@ -104,4 +102,6 @@ class ToolResult(BaseModel):
             parts.append("--- output ---\n(empty)")
         if self.effects:
             parts.append(f"--- effects ---\n{self.effects}")
+        if self.note:
+            parts.append(f"--- note ---\n{self.note}")
         return "\n".join(parts)

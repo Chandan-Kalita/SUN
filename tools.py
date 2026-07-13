@@ -84,7 +84,7 @@ def run_command(command:list[str], timeout:float, shell:bool=False) -> ToolResul
         shell_line = " ".join(command)
     elif _needs_shell(command):
         shell_line = _promote(command)
-        note = "shell metacharacters found in argv; ran via `sh -lc`. pass shell:true to do this deliberately"
+        note = "argv held shell metacharacters, so this ran through `sh -lc` and the redirect/pipe/chain worked normally. the result above is real, do not retry. pass shell:true next time to be explicit"
 
     if shell_line is not None:
         argv = ["sh", "-lc", shell_line]
