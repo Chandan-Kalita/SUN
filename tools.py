@@ -2,6 +2,7 @@ import fnmatch
 import os
 import shlex
 import stat as statmod
+import time
 from pathlib import Path
 import subprocess
 
@@ -99,10 +100,13 @@ def run_command(command:list[str], timeout:float, shell:bool=False) -> ToolResul
 
     watched = _watched_paths(command)
     before = _snapshot(watched)
+    started = time.monotonic()
     try:
         output = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as e:
-        return ToolResult(ok=False, error=f"{type(e).__name__}: {e}", note=note)
+        return ToolResult(ok=False, error=f"{type(e).__name__}: {e}", note=note,
+                          duration_ms=round((time.monotonic() - started) * 1000))
+    duration_ms = round((time.monotonic() - started) * 1000)
 
     watched = list(dict.fromkeys(watched + _watched_paths(command)))
     after = _snapshot(watched)
@@ -118,6 +122,7 @@ def run_command(command:list[str], timeout:float, shell:bool=False) -> ToolResul
         error=_truncate(output.stderr) or None,
         note=note,
         effects=_diff(before, after),
+        duration_ms=duration_ms,
     )
 
 def _truncate(s: str, limit: int = 2000) -> str:

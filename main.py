@@ -1,8 +1,8 @@
 import json
-import pprint
 import uuid
 
 import client
+import log
 import model
 import readline
 
@@ -14,6 +14,8 @@ MAX_TOOL_CALL_LIMIT= 10
 REPEAT_FAILURE_LIMIT = 3
 CONSECUTIVE_FAILURE_LIMIT = 5
 SESSION_ID=uuid.uuid4()
+LOG_PATH = log.init(SESSION_ID)
+print(f"[log] {LOG_PATH}")
 
 
 
@@ -45,13 +47,14 @@ def get_updated_system_prompt():
     return SYSTEM_PROMPT
 
 messages : list[model.Message] = []
-# what are the files in my current dir
-# whats my current dir and what are the files
+
 def append_message(message:model.Message):
     messages.append(message)
-    # pprint.pprint(messages)
-    with open("chain.txt", "w") as f:
-        f.write(str(pprint.pformat([msg.model_dump(exclude_none=True) for msg in messages])))
+    tool_calls = None
+    if message.tool_calls:
+        tool_calls = [{"name": tc.function.name, "args": log.clip(tc.function.arguments, 300)} for tc in message.tool_calls]
+    log.event("message", role=message.role, content=log.clip(message.content),
+              tool_calls=tool_calls, tool_call_id=message.tool_call_id, depth=len(messages))
 
 
 def run_compaction():
@@ -76,8 +79,11 @@ def run_compaction():
     if response.success is True:
         messages = [response.data.choices[0].message] + messages[cut:]
         print(f"[compaction] summarized {len(conversations)} messages -> 1; total messages {before} -> {len(messages)}")
+        log.event("compaction", ok=True, summarized=len(conversations),
+                  messages_before=before, messages_after=len(messages), chars_in=len(text))
     else:
         print(f"[compaction] failed: {response.error}")
+        log.event("compaction", ok=False, error=log.clip(response.error, 300))
 
 
     permanent_facts,session_facts = get_memories()
@@ -100,12 +106,15 @@ def run_compaction():
         print(f"[extractor] skipped: expected an object, got {type(new_facts).__name__}")
         return
 
+    learned = {}
     for store, key in ((permanent_facts, "permanent_facts"), (session_facts, "session_facts")):
         section = new_facts.get(key)
         if isinstance(section, dict):
             store.update(section)
+            learned[key] = list(section)
         elif section is not None:
             print(f"[extractor] ignored {key}: expected an object, got {type(section).__name__}")
+    log.event("extractor", ok=True, learned=learned or None)
 
     with open("permanent_facts.json", "w") as file:
         file.write(json.dumps(permanent_facts))
@@ -169,6 +178,13 @@ def tool_call_loop(data:model.ChatCompletionResponse):
         stuck_reason = None
         for tool_call in response_msg.tool_calls or []:
             result = call_tool(tool_call)
+            log.event("tool_call", name=tool_call.function.name,
+                      args=log.clip(tool_call.function.arguments, 300),
+                      ok=result.ok, exit_code=result.exit_code, duration_ms=result.duration_ms,
+                      promoted_to_shell=bool(result.note) or None,
+                      effects=log.clip(result.effects, 300), error=log.clip(result.error, 300),
+                      output_chars=len(result.output) if result.output else 0,
+                      iteration=iter_count)
             append_message(model.Message(role="tool", content=result.render(), tool_call_id=tool_call.id))
 
             if result.ok:
@@ -189,6 +205,9 @@ def tool_call_loop(data:model.ChatCompletionResponse):
 
         if stuck_reason:
             guidance = ask_user_unstick(stuck_reason)
+            log.event("stuck", reason=log.clip(stuck_reason, 300), iteration=iter_count,
+                      action="abort" if guidance is None else "guided",
+                      guidance=log.clip(guidance))
             if guidance is None:
                 return {"success":False, "data":data}
             append_message(model.Message(role="user", content=guidance))
@@ -208,9 +227,12 @@ def tool_call_loop(data:model.ChatCompletionResponse):
         iter_count += 1
 
 token_usage = []
+turn = 0
 
 while True:
     user_q = input("->")
+    turn += 1
+    log.event("turn_start", turn=turn, prompt=log.clip(user_q))
     append_message(model.Message(role="user",content=user_q))
     response = client.chat(messages=messages, system_prompt=get_updated_system_prompt())
     if response.success is False:
@@ -242,5 +264,8 @@ while True:
         f"{cache_info} | messages {len(messages)}"
     )
     print(f"[usage] trend (last 10): {token_usage[-10:]}")
+    log.event("turn_end", turn=turn, prompt_tokens=usage.prompt_tokens,
+              completion_tokens=usage.completion_tokens, total_tokens=usage.total_tokens,
+              cached_tokens=cache_hit, budget_pct=round(budget_pct, 1), messages=len(messages))
     maybe_compact(usage.prompt_tokens)
     

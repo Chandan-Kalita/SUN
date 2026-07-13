@@ -8,6 +8,7 @@ import httpx
 from httpx import Client, Timeout
 from pydantic import ValidationError
 
+import log
 import model
 import tools
 
@@ -45,7 +46,17 @@ def _backoff(attempt: int) -> float:
     return random.uniform(0, min(MAX_DELAY, BASE_DELAY * 2 ** attempt))
 
 
-def _post(messages: list[model.Message], **payload_extra) -> model.ChatResponse:
+def _elapsed_ms(started: float) -> int:
+    return round((time.monotonic() - started) * 1000)
+
+
+def _failed(purpose: str, started: float, attempts: int, error: str) -> model.ChatResponse:
+    log.event("llm_call", purpose=purpose, model=MODEL, ok=False, attempts=attempts,
+              latency_ms=_elapsed_ms(started), error=log.clip(error, 300))
+    return model.ChatResponse(success=False, data=None, error=error)
+
+
+def _post(messages: list[model.Message], purpose: str, **payload_extra) -> model.ChatResponse:
     payload = {
         "model": MODEL,
         "messages": [msg.model_dump(exclude_none=True) for msg in messages],
@@ -54,6 +65,7 @@ def _post(messages: list[model.Message], **payload_extra) -> model.ChatResponse:
         **payload_extra,
     }
 
+    started = time.monotonic()
     last_error = "no attempts made"
     for attempt in range(MAX_ATTEMPTS):
         delay = None
@@ -65,24 +77,31 @@ def _post(messages: list[model.Message], **payload_extra) -> model.ChatResponse:
         else:
             if res.is_success:
                 try:
-                    return model.ChatResponse(
-                        success=True,
-                        data=model.ChatCompletionResponse.model_validate(res.json()),
-                        error=None,
-                    )
+                    parsed = model.ChatCompletionResponse.model_validate(res.json())
                 except (ValueError, ValidationError) as e:
-                    return model.ChatResponse(
-                        success=False, data=None, error=f"unparseable response: {e}; body: {res.text[:500]}"
-                    )
+                    return _failed(purpose, started, attempt + 1,
+                                   f"unparseable response: {e}; body: {res.text[:500]}")
+                usage = parsed.usage
+                log.event("llm_call", purpose=purpose, model=MODEL, ok=True, attempts=attempt + 1,
+                          latency_ms=_elapsed_ms(started),
+                          finish_reason=parsed.choices[0].finish_reason,
+                          prompt_tokens=usage.prompt_tokens if usage else None,
+                          completion_tokens=usage.completion_tokens if usage else None,
+                          total_tokens=usage.total_tokens if usage else None,
+                          cached_tokens=usage.prompt_cache_hit_tokens if usage else None)
+                return model.ChatResponse(success=True, data=parsed, error=None)
+
             last_error = f"HTTP {res.status_code}: {res.text}"
             if res.status_code not in RETRY_STATUS:
-                return model.ChatResponse(success=False, data=None, error=last_error)
+                return _failed(purpose, started, attempt + 1, last_error)
             delay = _retry_after(res)
             if delay is None:
                 delay = _backoff(attempt)
 
         if attempt == MAX_ATTEMPTS - 1:
             break
+        log.event("llm_retry", purpose=purpose, attempt=attempt + 1, delay_ms=round(delay * 1000),
+                  error=log.clip(last_error, 200))
         print(
             f"[retry] attempt {attempt + 1}/{MAX_ATTEMPTS} failed ({last_error[:120]}), "
             f"sleeping {delay:.1f}s",
@@ -90,14 +109,13 @@ def _post(messages: list[model.Message], **payload_extra) -> model.ChatResponse:
         )
         time.sleep(delay)
 
-    return model.ChatResponse(
-        success=False, data=None, error=f"gave up after {MAX_ATTEMPTS} attempts; last error: {last_error}"
-    )
+    return _failed(purpose, started, MAX_ATTEMPTS,
+                   f"gave up after {MAX_ATTEMPTS} attempts; last error: {last_error}")
 
 
 def chat(messages: list[model.Message], system_prompt: str):
     messages = [model.Message(role="system", content=system_prompt)] + messages
-    return _post(messages, tools=tools.tools)
+    return _post(messages, purpose="chat", tools=tools.tools)
 
 
 def compact(messages: list[model.Message]):
@@ -108,7 +126,7 @@ def compact(messages: list[model.Message]):
     "Drop: articles (a/an/the), filler (just/really/basically/actually/simply), " \
     "pleasantries (sure/certainly/of course/happy to), hedging. " \
     "Fragments OK. Short synonyms (big not extensive, fix not 'implement a solution for')")] + messages
-    return _post(messages)
+    return _post(messages, purpose="compact")
 
 
 def extractor(messages: list[model.Message], existing_facts):
@@ -133,10 +151,7 @@ Rules:
 - Values should be concise strings or simple types.
 - Do NOT include conversational fluff, opinions, or anything the user said casually without intent.""")] + messages
 
-    res = _post(messages)
-    if res.success:
-        print(res.data.choices[0].message.content)
-    return res
+    return _post(messages, purpose="extractor")
 
 
 # {

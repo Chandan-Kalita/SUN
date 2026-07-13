@@ -4,3 +4,4 @@ chain.txt
 permanent_facts.json
 session_facts*
 __pycache__
+logs

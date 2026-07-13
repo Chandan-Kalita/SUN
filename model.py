@@ -88,6 +88,7 @@ class ToolResult(BaseModel):
     exit_code: int | None = None
     note: str | None = None
     effects: str | None = None
+    duration_ms: int | None = None
 
     def render(self) -> str:
         header = f"ok:{str(self.ok).lower()}"
