@@ -1,8 +1,15 @@
 import fnmatch
+import os
+import shlex
+import stat as statmod
 from pathlib import Path
 import subprocess
 
 from model import ToolResult
+
+SHELL_TOKENS = {">", ">>", "<", "|", "||", "&&", ";", "&"}
+INFORMATIONAL_EXIT = {"grep", "egrep", "fgrep", "rg", "diff", "cmp", "test"}
+MAX_WATCHED_PATHS = 200
 
 
 def _consent(prompt: str) -> ToolResult | None:
@@ -14,19 +21,103 @@ def _consent(prompt: str) -> ToolResult | None:
     return ToolResult(ok=False, error=f"user declined and instructed instead: {answer}")
 
 
-def run_command(command:list[str], timeout:float) -> ToolResult:
-    refused = _consent(f"sun wants to execute this command {command}, press y to proceed and n to cancel or instruct sun what to do different: ")
+def _needs_shell(command:list[str]) -> bool:
+    return any(tok in SHELL_TOKENS or tok.startswith("$(") or "`" in tok for tok in command)
+
+
+def _promote(command:list[str]) -> str:
+    parts = []
+    for tok in command:
+        if tok in SHELL_TOKENS or any(c in tok for c in "*?$~`"):
+            parts.append(tok)
+        else:
+            parts.append(shlex.quote(tok))
+    return " ".join(parts)
+
+
+def _watched_paths(command:list[str]) -> list[str]:
+    paths = []
+    for tok in command:
+        if tok.startswith("-") or tok in SHELL_TOKENS:
+            continue
+        if any(c in tok for c in "*?`$"):
+            continue
+        paths.append(tok)
+    try:
+        paths.extend(os.listdir("."))
+    except OSError:
+        pass
+    return list(dict.fromkeys(paths))[:MAX_WATCHED_PATHS]
+
+
+def _snapshot(paths:list[str]) -> dict:
+    snap = {}
+    for path in paths:
+        try:
+            st = os.stat(path)
+            kind = "dir" if statmod.S_ISDIR(st.st_mode) else "file"
+            snap[path] = (kind, st.st_size, st.st_mtime_ns)
+        except OSError:
+            snap[path] = None
+    return snap
+
+
+def _diff(before:dict, after:dict) -> str:
+    lines = []
+    for path, now in after.items():
+        was = before.get(path)
+        if was == now:
+            continue
+        if was is None and now is not None:
+            lines.append(f"created: {path} ({now[0]}, {now[1]} bytes)")
+        elif was is not None and now is None:
+            lines.append(f"deleted: {path}")
+        elif now is not None:
+            lines.append(f"modified: {path} ({now[0]}, {now[1]} bytes)")
+    return "\n".join(lines) if lines else "no filesystem changes observed"
+
+
+def run_command(command:list[str], timeout:float, shell:bool=False) -> ToolResult:
+    note = None
+    shell_line = None
+    if shell:
+        shell_line = " ".join(command)
+    elif _needs_shell(command):
+        shell_line = _promote(command)
+        note = "shell metacharacters found in argv; ran via `sh -lc`. pass shell:true to do this deliberately"
+
+    if shell_line is not None:
+        argv = ["sh", "-lc", shell_line]
+        display = f"sh -lc {shell_line!r}"
+    else:
+        argv = command
+        display = str(command)
+
+    refused = _consent(f"sun wants to execute this command {display}, press y to proceed and n to cancel or instruct sun what to do different: ")
     if refused:
         return refused
+
+    watched = _watched_paths(command)
+    before = _snapshot(watched)
     try:
-        output = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        output = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except Exception as e:
-        return ToolResult(ok=False, error=f"{type(e).__name__}: {e}")
+        return ToolResult(ok=False, error=f"{type(e).__name__}: {e}", note=note)
+
+    watched = list(dict.fromkeys(watched + _watched_paths(command)))
+    after = _snapshot(watched)
+    before = {path: before.get(path) for path in watched}
+
+    exe = command[0].split()[0] if command else ""
+    ok = output.returncode == 0 or (exe in INFORMATIONAL_EXIT and output.returncode == 1)
+
     return ToolResult(
-        ok=output.returncode == 0,
+        ok=ok,
         exit_code=output.returncode,
         output=_truncate(output.stdout) or None,
         error=_truncate(output.stderr) or None,
+        note=note,
+        effects=_diff(before, after),
     )
 
 def _truncate(s: str, limit: int = 2000) -> str:
@@ -96,8 +187,10 @@ tools = [
             "name": "run_command",
             "description": (
                 "Execute a system command on the local machine after obtaining "
-                "user confirmation. The command must be provided as a list of "
-                "arguments rather than a single shell string."
+                "user confirmation. Runs without a shell by default, so shell "
+                "features need shell:true. The result reports the filesystem "
+                "changes actually observed, so verify them instead of assuming "
+                "a zero exit code did what you intended."
             ),
             "parameters": {
                 "type": "object",
@@ -108,7 +201,11 @@ tools = [
                             "The command to execute as a list of strings. "
                             "The first element must be the executable, followed "
                             "by its arguments. For example: "
-                            '["python", "--version"] or ["ls", "-la"].'
+                            '["python", "--version"] or ["ls", "-la"]. '
+                            "When shell is true the elements are joined with "
+                            "spaces into a single shell line, so "
+                            '["echo hi > f.txt"] and ["echo", "hi", ">", "f.txt"] '
+                            "are equivalent."
                         ),
                         "items": {
                             "type": "string"
@@ -119,6 +216,16 @@ tools = [
                         "description": (
                             "Maximum time in seconds to allow the command to run "
                             "before timing out."
+                        ),
+                    },
+                    "shell": {
+                        "type": "boolean",
+                        "description": (
+                            "Run the command through `sh -lc`. Required for "
+                            "redirection (>), pipes (|), chaining (&& ;), globs, "
+                            "and variable expansion -- without it those "
+                            "characters are passed to the program as literal "
+                            "arguments and do nothing. Defaults to false."
                         ),
                     },
                 },

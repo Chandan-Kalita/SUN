@@ -118,7 +118,7 @@ def call_tool(tool_to_call:model.ToolCall) -> model.ToolResult:
     try:
         match tool_to_call.function.name:
             case "run_command":
-                return tools.run_command(command=args["command"], timeout=args["timeout"])
+                return tools.run_command(command=args["command"], timeout=args["timeout"], shell=args.get("shell", False))
             case "read_chunk":
                 return tools.read_chunk(file_path=args["file_path"], offset=args["offset"], char_limit=args["char_limit"])
             case _:
