@@ -167,7 +167,7 @@ while True:
     response = client.chat(messages=messages, system_prompt=get_updated_system_prompt())
     if response.success is False:
         print(response.error)
-        break
+        continue
     data = response.data
     
     if data.choices[0].finish_reason == "tool_calls":
