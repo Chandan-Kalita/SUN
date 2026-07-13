@@ -2,23 +2,32 @@ import fnmatch
 from pathlib import Path
 import subprocess
 
+from model import ToolResult
 
-def run_command(command:list[str], timeout:float):
-    consent = input(f"sun wants to execute this command {command}, press y to proceed and n to cancel or instruct sun what to do different: ")
-    if consent.lower().strip() != 'y':
-        
-        if consent.lower().strip() == 'n':
-            return "ran:false;reason:user declined"
-        else :
-            return f"ran:false;reason:{consent}"
+
+def _consent(prompt: str) -> ToolResult | None:
+    answer = input(prompt).lower().strip()
+    if answer == 'y':
+        return None
+    if answer == 'n':
+        return ToolResult(ok=False, error="user declined")
+    return ToolResult(ok=False, error=f"user declined and instructed instead: {answer}")
+
+
+def run_command(command:list[str], timeout:float) -> ToolResult:
+    refused = _consent(f"sun wants to execute this command {command}, press y to proceed and n to cancel or instruct sun what to do different: ")
+    if refused:
+        return refused
     try:
         output = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
     except Exception as e:
-        return f"ran:false;error:{e}"
-    _stdout = _truncate(output.stdout)
-    _stderr = _truncate(output.stderr)
-    _exitcode = output.returncode
-    return f"ran:true;exitcode:{_exitcode};stdout:{_stdout};stderr:{_stderr}"
+        return ToolResult(ok=False, error=f"{type(e).__name__}: {e}")
+    return ToolResult(
+        ok=output.returncode == 0,
+        exit_code=output.returncode,
+        output=_truncate(output.stdout) or None,
+        error=_truncate(output.stderr) or None,
+    )
 
 def _truncate(s: str, limit: int = 2000) -> str:
     if len(s) <= limit:
@@ -62,28 +71,22 @@ def is_critical_file(file_path: str) -> bool:
             
     return False
 
-def read_chunk(file_path, offset, char_limit=2000):
+def read_chunk(file_path, offset, char_limit=2000) -> ToolResult:
     print(f"reading {file_path} from {offset} to {char_limit}...")
     if is_critical_file(file_path=file_path) is True:
-        consent = input(f"this file looks critical do you want to allow sun to read it, press y to proceed and n to cancel or instruct sun what to do different: ")
-        if consent.lower().strip() != 'y':    
-            if consent.lower().strip() == 'n':
-                return "ran:false;reason:user declined"
-            else :
-                return f"ran:false;reason:{consent}"
+        refused = _consent(f"this file looks critical do you want to allow sun to read it, press y to proceed and n to cancel or instruct sun what to do different: ")
+        if refused:
+            return refused
 
     if char_limit > 2000:
-        return f"ran:false;reason:char_limit must be less then 2000"
+        return ToolResult(ok=False, error="char_limit must be less then 2000")
     try :
         with open(file_path, "r", encoding="utf-8") as file:
-        # Jump directly to the offset position
             file.seek(offset)
-            
-            # Read only the limited amount into memory
             data = file.read(char_limit)
-            return data
+            return ToolResult(ok=True, output=data)
     except Exception as e:
-        return f"ran:false;error:{e}"
+        return ToolResult(ok=False, error=f"{type(e).__name__}: {e}")
 
 # print(run_command(["cat1","chain2.txt"], timeout=10))
 tools = [

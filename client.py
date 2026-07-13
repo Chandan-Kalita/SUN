@@ -38,12 +38,10 @@ def _retry_after(res: httpx.Response) -> float | None:
     try:
         return max(0.0, float(raw))
     except ValueError:
-        # The header also allows an HTTP-date, which we don't honor.
         return None
 
 
 def _backoff(attempt: int) -> float:
-    # Full jitter, so concurrent retries don't resynchronize.
     return random.uniform(0, min(MAX_DELAY, BASE_DELAY * 2 ** attempt))
 
 

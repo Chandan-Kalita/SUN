@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 class FunctionTool(BaseModel):
     arguments:str
@@ -79,3 +79,23 @@ class ChatResponse(BaseModel):
     success:bool
     data:ChatCompletionResponse|None
     error:str|None
+
+
+class ToolResult(BaseModel):
+    ok: bool
+    output: str | None = None
+    error: str | None = None
+    exit_code: int | None = None
+
+    def render(self) -> str:
+        header = f"ok:{str(self.ok).lower()}"
+        if self.exit_code is not None:
+            header += f" exit_code:{self.exit_code}"
+        parts = [header]
+        if self.error:
+            parts.append(f"--- error ---\n{self.error}")
+        if self.output:
+            parts.append(f"--- output ---\n{self.output}")
+        if self.ok and not self.output and not self.error:
+            parts.append("--- output ---\n(empty)")
+        return "\n".join(parts)
