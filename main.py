@@ -85,21 +85,32 @@ def run_compaction():
     all_facts = {"permanent_facts":permanent_facts,"session_facts":session_facts}
 
     extractor_response = client.extractor(messages=[model.Message(role="user", content=text)], existing_facts=json.dumps(all_facts))
-    if extractor_response.success is True:
-        raw = extractor_response.data.choices[0].message.content or ""
-        raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
-        new_facts = json.loads(raw)
-        new_permanent_facts = new_facts["permanent_facts"]
-        new_session_facts = new_facts["session_facts"]
-        for key,val in new_permanent_facts.items():
-            permanent_facts[key] = val
-        for key,val in new_session_facts.items():
-            session_facts[key] = val
+    if extractor_response.success is False:
+        print(f"[extractor] failed: {extractor_response.error}")
+        return
 
-        with open("permanent_facts.json", "w") as file:
-            file.write(json.dumps(permanent_facts))
-        with open(f"session_facts_{SESSION_ID}.json", "w") as file:
-            file.write(json.dumps(session_facts))
+    raw = extractor_response.data.choices[0].message.content or ""
+    raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
+    try:
+        new_facts = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"[extractor] skipped: malformed JSON ({e}); got {raw[:200]!r}")
+        return
+    if not isinstance(new_facts, dict):
+        print(f"[extractor] skipped: expected an object, got {type(new_facts).__name__}")
+        return
+
+    for store, key in ((permanent_facts, "permanent_facts"), (session_facts, "session_facts")):
+        section = new_facts.get(key)
+        if isinstance(section, dict):
+            store.update(section)
+        elif section is not None:
+            print(f"[extractor] ignored {key}: expected an object, got {type(section).__name__}")
+
+    with open("permanent_facts.json", "w") as file:
+        file.write(json.dumps(permanent_facts))
+    with open(f"session_facts_{SESSION_ID}.json", "w") as file:
+        file.write(json.dumps(session_facts))
     
 
 
